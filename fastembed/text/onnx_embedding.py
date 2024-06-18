@@ -1,10 +1,11 @@
-from typing import Dict, Optional, Tuple, Union, Iterable, Type, List, Any
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Type, Union
 
 import numpy as np
 
-from fastembed.common.onnx_model import OnnxModel, EmbeddingWorker
-from fastembed.common.models import normalize
-from fastembed.common.utils import define_cache_dir
+from fastembed.common import OnnxProvider
+from fastembed.common.onnx_model import OnnxOutputContext
+from fastembed.common.utils import define_cache_dir, normalize
+from fastembed.text.onnx_text_model import OnnxTextModel, TextEmbeddingWorker
 from fastembed.text.text_embedding_base import TextEmbeddingBase
 
 supported_onnx_models = [
@@ -16,6 +17,7 @@ supported_onnx_models = [
         "sources": {
             "url": "https://storage.googleapis.com/qdrant-fastembed/fast-bge-base-en.tar.gz",
         },
+        "model_file": "model_optimized.onnx",
     },
     {
         "model": "BAAI/bge-base-en-v1.5",
@@ -26,6 +28,7 @@ supported_onnx_models = [
             "url": "https://storage.googleapis.com/qdrant-fastembed/fast-bge-base-en-v1.5.tar.gz",
             "hf": "qdrant/bge-base-en-v1.5-onnx-q",
         },
+        "model_file": "model_optimized.onnx",
     },
     {
         "model": "BAAI/bge-large-en-v1.5",
@@ -35,6 +38,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "qdrant/bge-large-en-v1.5-onnx",
         },
+        "model_file": "model.onnx",
     },
     {
         "model": "BAAI/bge-small-en",
@@ -44,18 +48,8 @@ supported_onnx_models = [
         "sources": {
             "url": "https://storage.googleapis.com/qdrant-fastembed/BAAI-bge-small-en.tar.gz",
         },
+        "model_file": "model_optimized.onnx",
     },
-    # {
-    #     "model": "BAAI/bge-small-en",
-    #     "dim": 384,
-    #     "description": "Fast English model",
-    #     "size_in_GB": 0.2,
-    #     "hf_sources": [],
-    #     "compressed_url_sources": [
-    #         "https://storage.googleapis.com/qdrant-fastembed/fast-bge-small-en.tar.gz",
-    #         "https://storage.googleapis.com/qdrant-fastembed/BAAI-bge-small-en.tar.gz"
-    #     ]
-    # },
     {
         "model": "BAAI/bge-small-en-v1.5",
         "dim": 384,
@@ -64,6 +58,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "qdrant/bge-small-en-v1.5-onnx-q",
         },
+        "model_file": "model_optimized.onnx",
     },
     {
         "model": "BAAI/bge-small-zh-v1.5",
@@ -73,16 +68,7 @@ supported_onnx_models = [
         "sources": {
             "url": "https://storage.googleapis.com/qdrant-fastembed/fast-bge-small-zh-v1.5.tar.gz",
         },
-    },
-    {
-        "model": "sentence-transformers/all-MiniLM-L6-v2",
-        "dim": 384,
-        "description": "Sentence Transformer model, MiniLM-L6-v2",
-        "size_in_GB": 0.09,
-        "sources": {
-            "url": "https://storage.googleapis.com/qdrant-fastembed/sentence-transformers-all-MiniLM-L6-v2.tar.gz",
-            "hf": "qdrant/all-MiniLM-L6-v2-onnx",
-        },
+        "model_file": "model_optimized.onnx",
     },
     {
         "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -92,6 +78,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q",
         },
+        "model_file": "model_optimized.onnx",
     },
     {
         "model": "nomic-ai/nomic-embed-text-v1",
@@ -101,6 +88,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "nomic-ai/nomic-embed-text-v1",
         },
+        "model_file": "onnx/model.onnx",
     },
     {
         "model": "nomic-ai/nomic-embed-text-v1.5",
@@ -110,6 +98,17 @@ supported_onnx_models = [
         "sources": {
             "hf": "nomic-ai/nomic-embed-text-v1.5",
         },
+        "model_file": "onnx/model.onnx",
+    },
+    {
+        "model": "nomic-ai/nomic-embed-text-v1.5-Q",
+        "dim": 768,
+        "description": "Quantized 8192 context length english model",
+        "size_in_GB": 0.13,
+        "sources": {
+            "hf": "nomic-ai/nomic-embed-text-v1.5",
+        },
+        "model_file": "onnx/model_quantized.onnx",
     },
     {
         "model": "thenlper/gte-large",
@@ -119,20 +118,8 @@ supported_onnx_models = [
         "sources": {
             "hf": "qdrant/gte-large-onnx",
         },
+        "model_file": "model.onnx",
     },
-    # {
-    #     "model": "sentence-transformers/all-MiniLM-L6-v2",
-    #     "dim": 384,
-    #     "description": "Sentence Transformer model, MiniLM-L6-v2",
-    #     "size_in_GB": 0.09,
-    #     "hf_sources": [
-    #         "qdrant/all-MiniLM-L6-v2-onnx"
-    #     ],
-    #     "compressed_url_sources": [
-    #         "https://storage.googleapis.com/qdrant-fastembed/fast-all-MiniLM-L6-v2.tar.gz",
-    #         "https://storage.googleapis.com/qdrant-fastembed/sentence-transformers-all-MiniLM-L6-v2.tar.gz"
-    #     ]
-    # }
     {
         "model": "mixedbread-ai/mxbai-embed-large-v1",
         "dim": 1024,
@@ -141,6 +128,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "mixedbread-ai/mxbai-embed-large-v1",
         },
+        "model_file": "onnx/model.onnx",
     },
     {
         "model": "snowflake/snowflake-arctic-embed-xs",
@@ -150,6 +138,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "snowflake/snowflake-arctic-embed-xs",
         },
+        "model_file": "onnx/model.onnx",
     },
     {
         "model": "snowflake/snowflake-arctic-embed-s",
@@ -159,6 +148,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "snowflake/snowflake-arctic-embed-s",
         },
+        "model_file": "onnx/model.onnx",
     },
     {
         "model": "snowflake/snowflake-arctic-embed-m",
@@ -168,6 +158,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "Snowflake/snowflake-arctic-embed-m",
         },
+        "model_file": "onnx/model.onnx",
     },
     {
         "model": "snowflake/snowflake-arctic-embed-m-long",
@@ -177,6 +168,7 @@ supported_onnx_models = [
         "sources": {
             "hf": "snowflake/snowflake-arctic-embed-m-long",
         },
+        "model_file": "onnx/model.onnx",
     },
     {
         "model": "snowflake/snowflake-arctic-embed-l",
@@ -186,11 +178,12 @@ supported_onnx_models = [
         "sources": {
             "hf": "snowflake/snowflake-arctic-embed-l",
         },
+        "model_file": "onnx/model.onnx",
     },
 ]
 
 
-class OnnxTextEmbedding(TextEmbeddingBase, OnnxModel[np.ndarray]):
+class OnnxTextEmbedding(TextEmbeddingBase, OnnxTextModel[np.ndarray]):
     """Implementation of the Flag Embedding model."""
 
     @classmethod
@@ -208,6 +201,7 @@ class OnnxTextEmbedding(TextEmbeddingBase, OnnxModel[np.ndarray]):
         model_name: str = "BAAI/bge-small-en-v1.5",
         cache_dir: Optional[str] = None,
         threads: Optional[int] = None,
+        providers: Optional[Sequence[OnnxProvider]] = None,
         **kwargs,
     ):
         """
@@ -224,14 +218,18 @@ class OnnxTextEmbedding(TextEmbeddingBase, OnnxModel[np.ndarray]):
 
         super().__init__(model_name, cache_dir, threads, **kwargs)
 
-        self.model_name = model_name
-        self._model_description = self._get_model_description(model_name)
+        model_description = self._get_model_description(model_name)
+        self.cache_dir = define_cache_dir(cache_dir)
+        model_dir = self.download_model(
+            model_description, self.cache_dir, local_files_only=self._local_files_only
+        )
 
-        self._cache_dir = define_cache_dir(cache_dir)
-        self._model_dir = self.download_model(self._model_description, self._cache_dir)
-        self._max_length = 512
-
-        self.load_onnx_model(self._model_dir, self.threads, self._max_length)
+        self.load_onnx_model(
+            model_dir=model_dir,
+            model_file=model_description["model_file"],
+            threads=threads,
+            providers=providers,
+        )
 
     def embed(
         self,
@@ -257,34 +255,35 @@ class OnnxTextEmbedding(TextEmbeddingBase, OnnxModel[np.ndarray]):
         """
         yield from self._embed_documents(
             model_name=self.model_name,
-            cache_dir=str(self._cache_dir),
+            cache_dir=str(self.cache_dir),
             documents=documents,
             batch_size=batch_size,
             parallel=parallel,
+            **kwargs,
         )
 
     @classmethod
-    def _get_worker_class(cls) -> Type["EmbeddingWorker"]:
+    def _get_worker_class(cls) -> Type["TextEmbeddingWorker"]:
         return OnnxTextEmbeddingWorker
 
-    def _preprocess_onnx_input(self, onnx_input: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def _preprocess_onnx_input(
+        self, onnx_input: Dict[str, np.ndarray], **kwargs
+    ) -> Dict[str, np.ndarray]:
         """
         Preprocess the onnx input.
         """
         return onnx_input
 
-    @classmethod
-    def _post_process_onnx_output(
-        cls, output: Tuple[np.ndarray, np.ndarray]
-    ) -> Iterable[np.ndarray]:
-        embeddings, _ = output
+    def _post_process_onnx_output(self, output: OnnxOutputContext) -> Iterable[np.ndarray]:
+        embeddings = output.model_output
         return normalize(embeddings[:, 0]).astype(np.float32)
 
 
-class OnnxTextEmbeddingWorker(EmbeddingWorker):
+class OnnxTextEmbeddingWorker(TextEmbeddingWorker):
     def init_embedding(
         self,
         model_name: str,
         cache_dir: str,
+        **kwargs,
     ) -> OnnxTextEmbedding:
-        return OnnxTextEmbedding(model_name=model_name, cache_dir=cache_dir, threads=1)
+        return OnnxTextEmbedding(model_name=model_name, cache_dir=cache_dir, threads=1, **kwargs)

@@ -1,10 +1,15 @@
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, Type
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Type, Union
 
 import numpy as np
 
-from fastembed.common.onnx_model import EmbeddingWorker, OnnxModel
+from fastembed.common import OnnxProvider
+from fastembed.common.onnx_model import OnnxOutputContext
 from fastembed.common.utils import define_cache_dir
-from fastembed.sparse.sparse_embedding_base import SparseEmbedding, SparseTextEmbeddingBase
+from fastembed.sparse.sparse_embedding_base import (
+    SparseEmbedding,
+    SparseTextEmbeddingBase,
+)
+from fastembed.text.onnx_text_model import OnnxTextModel, TextEmbeddingWorker
 
 supported_splade_models = [
     {
@@ -15,6 +20,7 @@ supported_splade_models = [
         "sources": {
             "hf": "Qdrant/SPLADE_PP_en_v1",
         },
+        "model_file": "model.onnx",
     },
     {
         "model": "prithivida/Splade_PP_en_v1",
@@ -24,19 +30,16 @@ supported_splade_models = [
         "sources": {
             "hf": "Qdrant/SPLADE_PP_en_v1",
         },
+        "model_file": "model.onnx",
     },
 ]
 
 
-class SpladePP(SparseTextEmbeddingBase, OnnxModel[SparseEmbedding]):
-    @classmethod
-    def _post_process_onnx_output(
-        cls, output: Tuple[np.ndarray, np.ndarray]
-    ) -> Iterable[SparseEmbedding]:
-        logits, attention_mask = output
-        relu_log = np.log(1 + np.maximum(logits, 0))
+class SpladePP(SparseTextEmbeddingBase, OnnxTextModel[SparseEmbedding]):
+    def _post_process_onnx_output(self, output: OnnxOutputContext) -> Iterable[SparseEmbedding]:
+        relu_log = np.log(1 + np.maximum(output.model_output, 0))
 
-        weighted_log = relu_log * np.expand_dims(attention_mask, axis=-1)
+        weighted_log = relu_log * np.expand_dims(output.attention_mask, axis=-1)
 
         scores = np.max(weighted_log, axis=1)
 
@@ -61,6 +64,7 @@ class SpladePP(SparseTextEmbeddingBase, OnnxModel[SparseEmbedding]):
         model_name: str,
         cache_dir: Optional[str] = None,
         threads: Optional[int] = None,
+        providers: Optional[Sequence[OnnxProvider]] = None,
         **kwargs,
     ):
         """
@@ -77,14 +81,19 @@ class SpladePP(SparseTextEmbeddingBase, OnnxModel[SparseEmbedding]):
 
         super().__init__(model_name, cache_dir, threads, **kwargs)
 
-        self.model_name = model_name
-        self._model_description = self._get_model_description(model_name)
+        model_description = self._get_model_description(model_name)
+        self.cache_dir = define_cache_dir(cache_dir)
 
-        self._cache_dir = define_cache_dir(cache_dir)
-        self._model_dir = self.download_model(self._model_description, self._cache_dir)
-        self._max_length = 512
+        model_dir = self.download_model(
+            model_description, self.cache_dir, local_files_only=self._local_files_only
+        )
 
-        self.load_onnx_model(self._model_dir, self.threads, self._max_length)
+        self.load_onnx_model(
+            model_dir=model_dir,
+            model_file=model_description["model_file"],
+            threads=threads,
+            providers=providers,
+        )
 
     def embed(
         self,
@@ -110,21 +119,17 @@ class SpladePP(SparseTextEmbeddingBase, OnnxModel[SparseEmbedding]):
         """
         yield from self._embed_documents(
             model_name=self.model_name,
-            cache_dir=str(self._cache_dir),
+            cache_dir=str(self.cache_dir),
             documents=documents,
             batch_size=batch_size,
             parallel=parallel,
         )
 
     @classmethod
-    def _get_worker_class(cls) -> Type[EmbeddingWorker]:
+    def _get_worker_class(cls) -> Type[TextEmbeddingWorker]:
         return SpladePPEmbeddingWorker
 
 
-class SpladePPEmbeddingWorker(EmbeddingWorker):
-    def init_embedding(
-        self,
-        model_name: str,
-        cache_dir: str,
-    ) -> SpladePP:
-        return SpladePP(model_name=model_name, cache_dir=cache_dir, threads=1)
+class SpladePPEmbeddingWorker(TextEmbeddingWorker):
+    def init_embedding(self, model_name: str, cache_dir: str, **kwargs) -> SpladePP:
+        return SpladePP(model_name=model_name, cache_dir=cache_dir, threads=1, **kwargs)

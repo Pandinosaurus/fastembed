@@ -2,30 +2,13 @@ import os
 import shutil
 import tarfile
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import requests
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import RepositoryNotFoundError
-from tqdm import tqdm
 from loguru import logger
-
-
-def locate_model_file(model_dir: Path, file_names: List[str]) -> Path:
-    """
-    Find model path for both TransformerJS style `onnx`  subdirectory structure and direct model weights structure used
-    by Optimum and Qdrant
-    """
-    if not model_dir.is_dir():
-        raise ValueError(f"Provided model path '{model_dir}' is not a directory.")
-
-    for file_name in file_names:
-        file_paths = [path for path in model_dir.rglob(file_name) if path.is_file()]
-
-        if file_paths:
-            return file_paths[0]
-
-    raise ValueError(f"Could not find either of {', '.join(file_names)} in {model_dir}")
+from tqdm import tqdm
 
 
 class ModelManagement:
@@ -59,7 +42,9 @@ class ModelManagement:
         raise ValueError(f"Model {model_name} is not supported in {cls.__name__}.")
 
     @classmethod
-    def download_file_from_gcs(cls, url: str, output_path: str, show_progress: bool = True) -> str:
+    def download_file_from_gcs(
+        cls, url: str, output_path: str, show_progress: bool = True
+    ) -> str:
         """
         Downloads a file from Google Cloud Storage.
 
@@ -88,12 +73,17 @@ class ModelManagement:
 
         # Warn if the total size is zero
         if total_size_in_bytes == 0:
-            print(f"Warning: Content-length header is missing or zero in the response from {url}.")
+            print(
+                f"Warning: Content-length header is missing or zero in the response from {url}."
+            )
 
         show_progress = total_size_in_bytes and show_progress
 
         with tqdm(
-            total=total_size_in_bytes, unit="iB", unit_scale=True, disable=not show_progress
+            total=total_size_in_bytes,
+            unit="iB",
+            unit_scale=True,
+            disable=not show_progress,
         ) as progress_bar:
             with open(output_path, "wb") as file:
                 for chunk in response.iter_content(chunk_size=1024):
@@ -104,28 +94,37 @@ class ModelManagement:
 
     @classmethod
     def download_files_from_huggingface(
-        cls, hf_source_repo: str, cache_dir: Optional[str] = None
+        cls,
+        hf_source_repo: str,
+        cache_dir: Optional[str] = None,
+        extra_patterns: Optional[List[str]] = None,
+        **kwargs,
     ) -> str:
         """
         Downloads a model from HuggingFace Hub.
         Args:
             hf_source_repo (str): Name of the model on HuggingFace Hub, e.g. "qdrant/all-MiniLM-L6-v2-onnx".
             cache_dir (Optional[str]): The path to the cache directory.
+            extra_patterns (Optional[List[str]]): extra patterns to allow in the snapshot download, typically
+                includes the required model files.
         Returns:
             Path: The path to the model directory.
         """
+        allow_patterns = [
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "preprocessor_config.json",
+        ]
+        if extra_patterns is not None:
+            allow_patterns.extend(extra_patterns)
 
         return snapshot_download(
             repo_id=hf_source_repo,
-            allow_patterns=[
-                "*.onnx",
-                "*.onnx_data",
-                "config.json",
-                "tokenizer.json",
-                "tokenizer_config.json",
-                "special_tokens_map.json",
-            ],
+            allow_patterns=allow_patterns,
             cache_dir=cache_dir,
+            local_files_only=kwargs.get("local_files_only", False),
         )
 
     @classmethod
@@ -164,7 +163,9 @@ class ModelManagement:
         return cache_dir
 
     @classmethod
-    def retrieve_model_gcs(cls, model_name: str, source_url: str, cache_dir: str) -> Path:
+    def retrieve_model_gcs(
+        cls, model_name: str, source_url: str, cache_dir: str
+    ) -> Path:
         fast_model_name = f"fast-{model_name.split('/')[-1]}"
 
         cache_tmp_dir = Path(cache_dir) / "tmp"
@@ -190,8 +191,12 @@ class ModelManagement:
             output_path=str(model_tar_gz),
         )
 
-        cls.decompress_to_cache(targz_path=str(model_tar_gz), cache_dir=str(cache_tmp_dir))
-        assert model_tmp_dir.exists(), f"Could not find {model_tmp_dir} in {cache_tmp_dir}"
+        cls.decompress_to_cache(
+            targz_path=str(model_tar_gz), cache_dir=str(cache_tmp_dir)
+        )
+        assert (
+            model_tmp_dir.exists()
+        ), f"Could not find {model_tmp_dir} in {cache_tmp_dir}"
 
         model_tar_gz.unlink()
         # Rename from tmp to final name is atomic
@@ -200,7 +205,7 @@ class ModelManagement:
         return model_dir
 
     @classmethod
-    def download_model(cls, model: Dict[str, Any], cache_dir: Path) -> Path:
+    def download_model(cls, model: Dict[str, Any], cache_dir: Path, **kwargs) -> Path:
         """
         Downloads a model from HuggingFace Hub or Google Cloud Storage.
 
@@ -229,9 +234,17 @@ class ModelManagement:
         url_source = model.get("sources", {}).get("url")
 
         if hf_source:
+            extra_patterns = [model["model_file"]]
+            extra_patterns.extend(model.get("additional_files", []))
+
             try:
                 return Path(
-                    cls.download_files_from_huggingface(hf_source, cache_dir=str(cache_dir))
+                    cls.download_files_from_huggingface(
+                        hf_source,
+                        cache_dir=str(cache_dir),
+                        extra_patterns=extra_patterns,
+                        local_files_only=kwargs.get("local_files_only", False),
+                    )
                 )
             except (EnvironmentError, RepositoryNotFoundError, ValueError) as e:
                 logger.error(

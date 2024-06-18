@@ -20,6 +20,11 @@ class SparseEmbedding:
     def as_dict(self) -> Dict[int, float]:
         return {i: v for i, v in zip(self.indices, self.values)}
 
+    @classmethod
+    def from_dict(cls, data: Dict[int, float]) -> "SparseEmbedding":
+        indices, values = zip(*data.items())
+        return cls(values=np.array(values), indices=np.array(indices))
+
 
 class SparseTextEmbeddingBase(ModelManagement):
     def __init__(
@@ -32,6 +37,7 @@ class SparseTextEmbeddingBase(ModelManagement):
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.threads = threads
+        self._local_files_only = kwargs.pop("local_files_only", False)
 
     def embed(
         self,
@@ -41,3 +47,39 @@ class SparseTextEmbeddingBase(ModelManagement):
         **kwargs,
     ) -> Iterable[SparseEmbedding]:
         raise NotImplementedError()
+
+    def passage_embed(
+        self, texts: Iterable[str], **kwargs
+    ) -> Iterable[SparseEmbedding]:
+        """
+        Embeds a list of text passages into a list of embeddings.
+
+        Args:
+            texts (Iterable[str]): The list of texts to embed.
+            **kwargs: Additional keyword argument to pass to the embed method.
+
+        Yields:
+            Iterable[SparseEmbedding]: The sparse embeddings.
+        """
+
+        # This is model-specific, so that different models can have specialized implementations
+        yield from self.embed(texts, **kwargs)
+
+    def query_embed(
+        self, query: Union[str, Iterable[str]], **kwargs
+    ) -> Iterable[SparseEmbedding]:
+        """
+        Embeds queries
+
+        Args:
+            query (Union[str, Iterable[str]]): The query to embed, or an iterable e.g. list of queries.
+
+        Returns:
+            Iterable[SparseEmbedding]: The sparse embeddings.
+        """
+
+        # This is model-specific, so that different models can have specialized implementations
+        if isinstance(query, str):
+            yield from self.embed([query], **kwargs)
+        if isinstance(query, Iterable):
+            yield from self.embed(query, **kwargs)

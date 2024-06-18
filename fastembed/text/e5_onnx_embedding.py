@@ -1,9 +1,9 @@
-from typing import Type, List, Dict, Any
+from typing import Any, Dict, List, Type
 
 import numpy as np
 
-from fastembed.common.onnx_model import EmbeddingWorker
 from fastembed.text.onnx_embedding import OnnxTextEmbedding, OnnxTextEmbeddingWorker
+from fastembed.text.onnx_text_model import TextEmbeddingWorker
 
 supported_multilingual_e5_models = [
     {
@@ -15,6 +15,8 @@ supported_multilingual_e5_models = [
             "url": "https://storage.googleapis.com/qdrant-fastembed/fast-multilingual-e5-large.tar.gz",
             "hf": "qdrant/multilingual-e5-large-onnx",
         },
+        "model_file": "model.onnx",
+        "additional_files": ["model.onnx_data"],
     },
     {
         "model": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
@@ -24,13 +26,14 @@ supported_multilingual_e5_models = [
         "sources": {
             "hf": "xenova/paraphrase-multilingual-mpnet-base-v2",
         },
+        "model_file": "onnx/model.onnx",
     },
 ]
 
 
 class E5OnnxEmbedding(OnnxTextEmbedding):
     @classmethod
-    def _get_worker_class(cls) -> Type["EmbeddingWorker"]:
+    def _get_worker_class(cls) -> Type["TextEmbeddingWorker"]:
         return E5OnnxEmbeddingWorker
 
     @classmethod
@@ -42,7 +45,9 @@ class E5OnnxEmbedding(OnnxTextEmbedding):
         """
         return supported_multilingual_e5_models
 
-    def _preprocess_onnx_input(self, onnx_input: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def _preprocess_onnx_input(
+        self, onnx_input: Dict[str, np.ndarray], **kwargs
+    ) -> Dict[str, np.ndarray]:
         """
         Preprocess the onnx input.
         """
@@ -52,8 +57,8 @@ class E5OnnxEmbedding(OnnxTextEmbedding):
 
 class E5OnnxEmbeddingWorker(OnnxTextEmbeddingWorker):
     def init_embedding(
-        self,
-        model_name: str,
-        cache_dir: str,
+        self, model_name: str, cache_dir: str, **kwargs
     ) -> E5OnnxEmbedding:
-        return E5OnnxEmbedding(model_name=model_name, cache_dir=cache_dir, threads=1)
+        return E5OnnxEmbedding(
+            model_name=model_name, cache_dir=cache_dir, threads=1, **kwargs
+        )

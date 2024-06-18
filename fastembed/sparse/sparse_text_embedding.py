@@ -1,13 +1,17 @@
-from typing import List, Type, Dict, Any, Union, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Type, Union
 
-from fastembed.sparse.sparse_embedding_base import SparseTextEmbeddingBase, SparseEmbedding
+from fastembed.common import OnnxProvider
+from fastembed.sparse.bm25 import Bm25
+from fastembed.sparse.bm42 import Bm42
+from fastembed.sparse.sparse_embedding_base import (
+    SparseEmbedding,
+    SparseTextEmbeddingBase,
+)
 from fastembed.sparse.splade_pp import SpladePP
 
 
 class SparseTextEmbedding(SparseTextEmbeddingBase):
-    EMBEDDINGS_REGISTRY: List[Type[SparseTextEmbeddingBase]] = [
-        SpladePP,
-    ]
+    EMBEDDINGS_REGISTRY: List[Type[SparseTextEmbeddingBase]] = [SpladePP, Bm42, Bm25]
 
     @classmethod
     def list_supported_models(cls) -> List[Dict[str, Any]]:
@@ -42,14 +46,24 @@ class SparseTextEmbedding(SparseTextEmbeddingBase):
         model_name: str,
         cache_dir: Optional[str] = None,
         threads: Optional[int] = None,
+        providers: Optional[Sequence[OnnxProvider]] = None,
         **kwargs,
     ):
         super().__init__(model_name, cache_dir, threads, **kwargs)
 
         for EMBEDDING_MODEL_TYPE in self.EMBEDDINGS_REGISTRY:
             supported_models = EMBEDDING_MODEL_TYPE.list_supported_models()
-            if any(model_name.lower() == model["model"].lower() for model in supported_models):
-                self.model = EMBEDDING_MODEL_TYPE(model_name, cache_dir, threads, **kwargs)
+            if any(
+                model_name.lower() == model["model"].lower()
+                for model in supported_models
+            ):
+                self.model = EMBEDDING_MODEL_TYPE(
+                    model_name,
+                    cache_dir,
+                    threads=threads,
+                    providers=providers,
+                    **kwargs,
+                )
                 return
 
         raise ValueError(
@@ -80,3 +94,17 @@ class SparseTextEmbedding(SparseTextEmbeddingBase):
             List of embeddings, one per document
         """
         yield from self.model.embed(documents, batch_size, parallel, **kwargs)
+
+    def query_embed(
+        self, query: Union[str, Iterable[str]], **kwargs
+    ) -> Iterable[SparseEmbedding]:
+        """
+        Embeds queries
+
+        Args:
+            query (Union[str, Iterable[str]]): The query to embed, or an iterable e.g. list of queries.
+
+        Returns:
+            Iterable[SparseEmbedding]: The sparse embeddings.
+        """
+        yield from self.model.query_embed(query, **kwargs)
