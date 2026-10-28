@@ -1,21 +1,37 @@
-from typing import List, Type, Dict, Any, Union, Iterable, Optional
+from typing import Any, Iterable, Sequence, Type
+from dataclasses import asdict
 
-from fastembed.sparse.sparse_embedding_base import SparseTextEmbeddingBase, SparseEmbedding
+from fastembed.common import OnnxProvider
+from fastembed.common.types import Device
+from fastembed.sparse.bm25 import Bm25
+from fastembed.sparse.bm42 import Bm42
+from fastembed.sparse.if_splade import IfSplade
+from fastembed.sparse.minicoil import MiniCOIL
+from fastembed.sparse.sparse_embedding_base import (
+    SparseEmbedding,
+    SparseTextEmbeddingBase,
+)
 from fastembed.sparse.splade_pp import SpladePP
+import warnings
+from fastembed.common.model_description import SparseModelDescription
 
 
 class SparseTextEmbedding(SparseTextEmbeddingBase):
-    EMBEDDINGS_REGISTRY: List[Type[SparseTextEmbeddingBase]] = [
+    EMBEDDINGS_REGISTRY: list[Type[SparseTextEmbeddingBase]] = [
         SpladePP,
+        Bm42,
+        Bm25,
+        MiniCOIL,
+        IfSplade,
     ]
 
     @classmethod
-    def list_supported_models(cls) -> List[Dict[str, Any]]:
+    def list_supported_models(cls) -> list[dict[str, Any]]:
         """
         Lists the supported models.
 
         Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing the model information.
+            list[dict[str, Any]]: A list of dictionaries containing the model information.
 
             Example:
                 ```
@@ -24,32 +40,67 @@ class SparseTextEmbedding(SparseTextEmbeddingBase):
                         "model": "prithvida/SPLADE_PP_en_v1",
                         "vocab_size": 30522,
                         "description": "Independent Implementation of SPLADE++ Model for English",
+                        "license": "apache-2.0",
                         "size_in_GB": 0.532,
                         "sources": {
-                            "hf": "qdrant/SPLADE_PP_en_v1",
+                            "hf": "Qdrant/Splade_PP_en_v1",
                         },
                     }
                 ]
                 ```
         """
-        result = []
+        return [asdict(model) for model in cls._list_supported_models()]
+
+    @classmethod
+    def _list_supported_models(cls) -> list[SparseModelDescription]:
+        result: list[SparseModelDescription] = []
         for embedding in cls.EMBEDDINGS_REGISTRY:
-            result.extend(embedding.list_supported_models())
+            result.extend(embedding._list_supported_models())
         return result
 
     def __init__(
         self,
         model_name: str,
-        cache_dir: Optional[str] = None,
-        threads: Optional[int] = None,
-        **kwargs,
+        cache_dir: str | None = None,
+        threads: int | None = None,
+        providers: Sequence[OnnxProvider] | None = None,
+        cuda: bool | Device = Device.AUTO,
+        device_ids: list[int] | None = None,
+        lazy_load: bool = False,
+        **kwargs: Any,
     ):
         super().__init__(model_name, cache_dir, threads, **kwargs)
+        if model_name.lower() == "prithvida/Splade_PP_en_v1".lower():
+            warnings.warn(
+                "The right spelling is prithivida/Splade_PP_en_v1. "
+                "Support of this name will be removed soon, please fix the model_name",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            model_name = "prithivida/Splade_PP_en_v1"
+        # up to 0.9.1, model.onnx had no attention_mask, so padding changed bm42 document weights
+        if model_name.lower() == "qdrant/bm42-all-minilm-l6-v2-attentions":
+            warnings.warn(
+                "The model 'Qdrant/bm42-all-minilm-l6-v2-attentions' now masks padding, so "
+                "document weights no longer depend on the other documents in a batch. Re-embed "
+                "documents embedded in batches with fastembed<=0.9.1 to keep scores consistent.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         for EMBEDDING_MODEL_TYPE in self.EMBEDDINGS_REGISTRY:
-            supported_models = EMBEDDING_MODEL_TYPE.list_supported_models()
-            if any(model_name.lower() == model["model"].lower() for model in supported_models):
-                self.model = EMBEDDING_MODEL_TYPE(model_name, cache_dir, threads, **kwargs)
+            supported_models = EMBEDDING_MODEL_TYPE._list_supported_models()
+            if any(model_name.lower() == model.model.lower() for model in supported_models):
+                self.model = EMBEDDING_MODEL_TYPE(
+                    model_name,
+                    cache_dir,
+                    threads=threads,
+                    providers=providers,
+                    cuda=cuda,
+                    device_ids=device_ids,
+                    lazy_load=lazy_load,
+                    **kwargs,
+                )
                 return
 
         raise ValueError(
@@ -59,10 +110,10 @@ class SparseTextEmbedding(SparseTextEmbeddingBase):
 
     def embed(
         self,
-        documents: Union[str, Iterable[str]],
+        documents: str | Iterable[str],
         batch_size: int = 256,
-        parallel: Optional[int] = None,
-        **kwargs,
+        parallel: int | None = None,
+        **kwargs: Any,
     ) -> Iterable[SparseEmbedding]:
         """
         Encode a list of documents into list of embeddings.
@@ -80,3 +131,29 @@ class SparseTextEmbedding(SparseTextEmbeddingBase):
             List of embeddings, one per document
         """
         yield from self.model.embed(documents, batch_size, parallel, **kwargs)
+
+    def query_embed(self, query: str | Iterable[str], **kwargs: Any) -> Iterable[SparseEmbedding]:
+        """
+        Embeds queries
+
+        Args:
+            query (Union[str, Iterable[str]]): The query to embed, or an iterable e.g. list of queries.
+
+        Returns:
+            Iterable[SparseEmbedding]: The sparse embeddings.
+        """
+        yield from self.model.query_embed(query, **kwargs)
+
+    def token_count(
+        self, texts: str | Iterable[str], batch_size: int = 1024, **kwargs: Any
+    ) -> int:
+        """Returns the number of tokens in the texts.
+
+        Args:
+            texts (str | Iterable[str]): The list of texts to embed.
+            batch_size (int): Batch size for encoding
+
+        Returns:
+            int: Sum of number of tokens in the texts.
+        """
+        return self.model.token_count(texts, batch_size=batch_size, **kwargs)

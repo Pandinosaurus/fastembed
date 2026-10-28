@@ -1,13 +1,17 @@
 import logging
 import os
+import time
 from collections import defaultdict
+from copy import deepcopy
 from enum import Enum
 from multiprocessing import Queue, get_context
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized as BaseValue
 from queue import Empty
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Type
+from typing import Any, Iterable, Type
+
+from fastembed.common.types import Device
 
 # Single item should be processed in less than:
 processing_timeout = 10 * 60  # seconds
@@ -23,10 +27,10 @@ class QueueSignals(str, Enum):
 
 class Worker:
     @classmethod
-    def start(cls, **kwargs: Any) -> "Worker":
+    def start(cls, *args: Any, **kwargs: Any) -> "Worker":
         raise NotImplementedError()
 
-    def process(self, items: Iterable[Tuple[int, Any]]) -> Iterable[Tuple[int, Any]]:
+    def process(self, items: Iterable[tuple[int, Any]]) -> Iterable[tuple[int, Any]]:
         raise NotImplementedError()
 
 
@@ -36,7 +40,7 @@ def _worker(
     output_queue: Queue,
     num_active_workers: BaseValue,
     worker_id: int,
-    kwargs: Optional[Dict[str, Any]] = None,
+    kwargs: dict[str, Any] | None = None,
 ) -> None:
     """
     A worker that pulls data pints off the input queue, and places the execution result on the output queue.
@@ -47,7 +51,9 @@ def _worker(
     if kwargs is None:
         kwargs = {}
 
-    logging.info(f"Reader worker: {worker_id} PID: {os.getpid()}")
+    logging.info(
+        f"Reader worker: {worker_id} PID: {os.getpid()} Device: {kwargs.get('device_id', 'CPU')}"
+    )
     try:
         worker = worker_class.start(**kwargs)
 
@@ -73,7 +79,9 @@ def _worker(
         # See:
         # https://docs.python.org/3.6/library/multiprocessing.html?highlight=process#pipes-and-queues
         # https://docs.python.org/3.6/library/multiprocessing.html?highlight=process#programming-guidelines
+        input_queue.close()
         output_queue.close()
+        input_queue.join_thread()
         output_queue.join_thread()
 
         with num_active_workers.get_lock():
@@ -83,19 +91,32 @@ def _worker(
 
 
 class ParallelWorkerPool:
-    def __init__(self, num_workers: int, worker: Type[Worker], start_method: Optional[str] = None):
+    def __init__(
+        self,
+        num_workers: int,
+        worker: Type[Worker],
+        start_method: str | None = None,
+        device_ids: list[int] | None = None,
+        cuda: bool | Device = Device.AUTO,
+    ):
         self.worker_class = worker
         self.num_workers = num_workers
-        self.input_queue: Optional[Queue] = None
-        self.output_queue: Optional[Queue] = None
+        self.input_queue: Queue | None = None
+        self.output_queue: Queue | None = None
+        self.processes: list[BaseProcess] = []
         self.ctx: BaseContext = get_context(start_method)
-        self.processes: List[BaseProcess] = []
         self.queue_size = self.num_workers * max_internal_batch_size
-
-        self.num_active_workers: Optional[BaseValue] = None
+        self.emergency_shutdown = False
+        self.device_ids = device_ids
+        self.cuda = cuda
+        self.num_active_workers: BaseValue | None = None
 
     def start(self, **kwargs: Any) -> None:
+        self.emergency_shutdown = False
         self.input_queue = self.ctx.Queue(self.queue_size)
+        # An emergency shutdown unblocks the feeder thread with EPIPE (see semi_ordered_map), let it
+        # exit quietly instead of printing a traceback. ProcessPoolExecutor does the same.
+        self.input_queue._ignore_epipe = True  # type: ignore[attr-defined]
         self.output_queue = self.ctx.Queue(self.queue_size)
 
         ctx_value = self.ctx.Value("i", self.num_workers)
@@ -103,6 +124,12 @@ class ParallelWorkerPool:
         self.num_active_workers = ctx_value
 
         for worker_id in range(0, self.num_workers):
+            worker_kwargs = deepcopy(kwargs)
+            worker_kwargs["cuda"] = self.cuda
+            if self.device_ids:
+                device_id = self.device_ids[worker_id % len(self.device_ids)]
+                worker_kwargs["device_id"] = device_id
+
             assert hasattr(self.ctx, "Process")
             process = self.ctx.Process(
                 target=_worker,
@@ -112,14 +139,14 @@ class ParallelWorkerPool:
                     self.output_queue,
                     self.num_active_workers,
                     worker_id,
-                    kwargs.copy(),
+                    worker_kwargs,
                 ),
             )
             process.start()
             self.processes.append(process)
 
     def ordered_map(self, stream: Iterable[Any], *args: Any, **kwargs: Any) -> Iterable[Any]:
-        buffer = defaultdict(Any)
+        buffer: defaultdict[int, Any] = defaultdict(Any)  # type: ignore
         next_expected = 0
 
         for idx, item in self.semi_ordered_map(stream, *args, **kwargs):
@@ -130,7 +157,8 @@ class ParallelWorkerPool:
 
     def semi_ordered_map(
         self, stream: Iterable[Any], *args: Any, **kwargs: Any
-    ) -> Iterable[Tuple[int, Any]]:
+    ) -> Iterable[tuple[int, Any]]:
+        completed = False
         try:
             self.start(**kwargs)
 
@@ -140,6 +168,7 @@ class ParallelWorkerPool:
             pushed = 0
             read = 0
             for idx, item in enumerate(stream):
+                self.check_worker_health()
                 if pushed - read < self.queue_size:
                     try:
                         out_item = self.output_queue.get_nowait()
@@ -166,28 +195,71 @@ class ParallelWorkerPool:
                 self.input_queue.put(QueueSignals.stop)
 
             while read < pushed:
+                self.check_worker_health()
                 out_item = self.output_queue.get(timeout=processing_timeout)
                 if out_item == QueueSignals.error:
                     self.join_or_terminate()
                     raise RuntimeError("Thread unexpectedly terminated")
                 yield out_item
                 read += 1
+            completed = True
         finally:
             assert self.input_queue is not None, "Input queue is None"
             assert self.output_queue is not None, "Output queue is None"
+            if completed:
+                self.join()
+            else:
+                # The generator may be closed before the input stream is exhausted (for
+                # example, when a caller only consumes a prefix of the embeddings). In that
+                # case workers have not necessarily received their stop signals and a normal
+                # join would wait forever for processes blocked on the input queue.
+                self.emergency_shutdown = True
+                self.join_or_terminate()
+                # Nothing reads the input pipe anymore, so the feeder thread can be stuck
+                # writing to it, holding every item it hasn't sent. On POSIX, closing our
+                # read end fails that write with EPIPE; Windows also needs to cancel the send.
+                terminate_broken = getattr(self.input_queue, "_terminate_broken", None)
+                if terminate_broken is not None:
+                    terminate_broken()
+                else:
+                    self.input_queue._reader.close()  # type: ignore[attr-defined]
             self.input_queue.close()
             self.output_queue.close()
+            if self.emergency_shutdown:
+                self.input_queue.cancel_join_thread()
+                self.output_queue.cancel_join_thread()
+            else:
+                self.input_queue.join_thread()
+                self.output_queue.join_thread()
 
-    def join_or_terminate(self, timeout: Optional[int] = 1) -> None:
+    def check_worker_health(self) -> None:
+        """
+        Checks if any worker process has terminated unexpectedly
+        """
+        for process in self.processes:
+            if not process.is_alive() and process.exitcode != 0:
+                self.emergency_shutdown = True
+                self.join_or_terminate()
+                raise RuntimeError(
+                    f"Worker PID: {process.pid} terminated unexpectedly with code {process.exitcode}"
+                )
+
+    def join_or_terminate(self, timeout: int = 1) -> None:
         """
         Emergency shutdown
         @param timeout:
         @return:
         """
+        # One deadline for the whole pool: workers that can't finish (e.g. after an early close)
+        # would otherwise each use up the full timeout, one after another.
+        deadline = time.monotonic() + timeout
         for process in self.processes:
-            process.join(timeout=timeout)
+            process.join(timeout=max(0.0, deadline - time.monotonic()))
+        for process in self.processes:
             if process.is_alive():
                 process.terminate()
+        for process in self.processes:
+            process.join(timeout=timeout)
         self.processes.clear()
 
     def join(self) -> None:
@@ -206,4 +278,5 @@ class ParallelWorkerPool:
         https://eli.thegreenplace.net/2009/06/12/safely-using-destructors-in-python/.
         """
         for process in self.processes:
-            process.terminate()
+            if process.is_alive():
+                process.terminate()

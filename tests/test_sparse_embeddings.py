@@ -1,8 +1,16 @@
+import os
+from contextlib import contextmanager
+
 import pytest
+import numpy as np
+
+from fastembed.sparse.bm25 import Bm25
 from fastembed.sparse.sparse_text_embedding import SparseTextEmbedding
+from tests.utils import delete_model_cache, is_manual_run, should_test_model
+
 
 CANONICAL_COLUMN_VALUES = {
-    "prithvida/Splade_PP_en_v1": {
+    "prithivida/Splade_PP_en_v1": {
         "indices": [
             2040,
             2047,
@@ -37,62 +45,426 @@ CANONICAL_COLUMN_VALUES = {
             2.1904349327087402,
             1.0531445741653442,
         ],
-    }
+    },
+    "Qdrant/minicoil-v1": {
+        "indices": [80, 81, 82, 83, 6664, 6665, 6666, 6667],
+        "values": [
+            0.52634597,
+            0.8711344,
+            1.2264385,
+            0.52123857,
+            0.974713,
+            -0.97803956,
+            -0.94312465,
+            -0.12508166,
+        ],
+    },
+    # first 15 non-zero dimensions of the embedding
+    "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte": {
+        "indices": [
+            999,
+            1010,
+            1011,
+            1024,
+            1028,
+            1029,
+            1045,
+            1074,
+            1993,
+            2017,
+            2033,
+            2054,
+            2073,
+            2080,
+            2088,
+        ],
+        "values": [
+            0.16544909,
+            0.00529129,
+            0.0392109,
+            0.12337475,
+            0.09640586,
+            0.05325737,
+            0.09611791,
+            0.03159865,
+            0.01349991,
+            0.09392473,
+            0.01928805,
+            0.05238346,
+            0.05515401,
+            0.03156782,
+            0.98263124,
+        ],
+    },
 }
+
+CANONICAL_QUERY_VALUES = {
+    "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte": {
+        "indices": [2088, 7592],
+        "values": [3.42086864, 6.93775654],
+    },
+    "Qdrant/minicoil-v1": {
+        "indices": [80, 81, 82, 83, 6664, 6665, 6666, 6667],
+        "values": [
+            0.31389374,
+            0.5195128,
+            0.7314033,
+            0.3108479,
+            0.5812834,
+            -0.5832673,
+            -0.5624452,
+            -0.0745942,
+        ],
+    },
+}
+
+
+_MODELS_TO_CACHE = (
+    "prithivida/Splade_PP_en_v1",
+    "Qdrant/minicoil-v1",
+    "Qdrant/bm25",
+    "Qdrant/bm42-all-minilm-l6-v2-attentions",
+    "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte",
+)
+MODELS_TO_CACHE = tuple([x.lower() for x in _MODELS_TO_CACHE])
+
+
+@pytest.fixture(scope="module")
+def model_cache():
+    is_ci = os.getenv("CI")
+    cache = {}
+
+    @contextmanager
+    def get_model(model_name: str):
+        lowercase_model_name = model_name.lower()
+        if lowercase_model_name not in cache:
+            cache[lowercase_model_name] = SparseTextEmbedding(lowercase_model_name)
+        yield cache[lowercase_model_name]
+        if lowercase_model_name not in MODELS_TO_CACHE:
+            model_inst = cache.pop(lowercase_model_name)
+            if is_ci:
+                delete_model_cache(model_inst.model._model_dir)
+            del model_inst
+
+    yield get_model
+
+    if is_ci:
+        for name, model in cache.items():
+            delete_model_cache(model.model._model_dir)
+    cache.clear()
+
 
 docs = ["Hello World"]
 
 
-def test_batch_embedding():
+@pytest.mark.parametrize(
+    "model_name",
+    ["prithivida/Splade_PP_en_v1", "Qdrant/minicoil-v1"],
+)
+def test_batch_embedding(model_cache, model_name: str) -> None:
     docs_to_embed = docs * 10
 
-    for model_name, expected_result in CANONICAL_COLUMN_VALUES.items():
-        print("evaluating", model_name)
-        model = SparseTextEmbedding(model_name=model_name)
+    with model_cache(model_name) as model:
         result = next(iter(model.embed(docs_to_embed, batch_size=6)))
-        print(result.indices)
-
+        expected_result = CANONICAL_COLUMN_VALUES[model_name]
         assert result.indices.tolist() == expected_result["indices"]
 
         for i, value in enumerate(result.values):
             assert pytest.approx(value, abs=0.001) == expected_result["values"][i]
 
 
-def test_single_embedding():
-    docs_to_embed = docs
+def test_single_embedding(model_cache) -> None:
+    is_ci = os.getenv("CI")
+    is_manual = is_manual_run()
 
-    for model_name, expected_result in CANONICAL_COLUMN_VALUES.items():
-        print("evaluating", model_name)
-        model = SparseTextEmbedding(model_name=model_name)
-        result = next(iter(model.embed(docs_to_embed, batch_size=6)))
-        print(result.indices)
+    for model_desc in SparseTextEmbedding._list_supported_models():
+        if (
+            model_desc.model not in CANONICAL_COLUMN_VALUES
+        ):  # attention models and bm25 are also parts of
+            # SparseTextEmbedding, however, they have their own tests
+            continue
+        if not should_test_model(model_desc, model_desc.model, is_ci, is_manual):
+            continue
+        with model_cache(model_desc.model) as model:
+            passage_result = next(iter(model.embed(docs, batch_size=6)))
+            query_result = next(iter(model.query_embed(docs)))
+            expected_result = CANONICAL_COLUMN_VALUES[model_desc.model]
+            expected_query_result = CANONICAL_QUERY_VALUES.get(model_desc.model, expected_result)
 
-        assert result.indices.tolist() == expected_result["indices"]
+            # canonical values might contain only a prefix of the non-zero dimensions
+            num_dims = len(expected_result["indices"])
+            assert passage_result.indices.tolist()[:num_dims] == expected_result["indices"]
+            for i, value in enumerate(passage_result.values[:num_dims]):
+                assert pytest.approx(value, abs=0.001) == expected_result["values"][i]
 
-        for i, value in enumerate(result.values):
-            assert pytest.approx(value, abs=0.001) == expected_result["values"][i]
+            num_query_dims = len(expected_query_result["indices"])
+            assert (
+                query_result.indices.tolist()[:num_query_dims] == expected_query_result["indices"]
+            )
+            for i, value in enumerate(query_result.values[:num_query_dims]):
+                assert pytest.approx(value, abs=0.001) == expected_query_result["values"][i]
 
 
-def test_parallel_processing():
-    import numpy as np
+@pytest.mark.parametrize(
+    "model_name",
+    ["prithivida/Splade_PP_en_v1", "Qdrant/minicoil-v1"],
+)
+def test_parallel_processing(model_cache, model_name: str) -> None:
+    with model_cache(model_name) as model:
+        docs = ["hello world", "flag embedding"] * 30
+        sparse_embeddings_duo = list(model.embed(docs, batch_size=10, parallel=2))
+        # sparse_embeddings_all = list(model.embed(docs, batch_size=10, parallel=0))  # inherits OnnxTextModel which
+        # is tested in TextEmbedding, disabling it here to reduce number of requests to hf
+        # multiprocessing is enough to test with `parallel=2`, and `parallel=None` is okay to tests since it reuses
+        # model from cache
+        sparse_embeddings = list(model.embed(docs, batch_size=10, parallel=None))
 
-    model = SparseTextEmbedding(
-        model_name="prithivida/Splade_PP_en_v1",
-    )
-    docs = ["hello world", "flag embedding"] * 30
-    sparse_embeddings_duo = list(model.embed(docs, batch_size=10, parallel=2))
-    sparse_embeddings_all = list(model.embed(docs, batch_size=10, parallel=0))
-    sparse_embeddings = list(model.embed(docs, batch_size=10, parallel=None))
-
-    assert len(sparse_embeddings) == len(sparse_embeddings_duo) == len(sparse_embeddings_all) == len(docs)
-
-    for sparse_embedding, sparse_embedding_duo, sparse_embedding_all in zip(
-        sparse_embeddings, sparse_embeddings_duo, sparse_embeddings_all
-    ):
         assert (
-            sparse_embedding.indices.tolist()
-            == sparse_embedding_duo.indices.tolist()
-            == sparse_embedding_all.indices.tolist()
+            len(sparse_embeddings)
+            == len(sparse_embeddings_duo)
+            # == len(sparse_embeddings_all)
+            == len(docs)
         )
-        assert np.allclose(sparse_embedding.values, sparse_embedding_duo.values, atol=1e-3)
-        assert np.allclose(sparse_embedding.values, sparse_embedding_all.values, atol=1e-3)
+
+        for (
+            sparse_embedding,
+            sparse_embedding_duo,
+            # sparse_embedding_all
+        ) in zip(
+            sparse_embeddings,
+            sparse_embeddings_duo,
+            # sparse_embeddings_all
+        ):
+            assert (
+                sparse_embedding.indices.tolist() == sparse_embedding_duo.indices.tolist()
+                # == sparse_embedding_all.indices.tolist()
+            )
+            assert np.allclose(sparse_embedding.values, sparse_embedding_duo.values, atol=1e-3)
+            # assert np.allclose(sparse_embedding.values, sparse_embedding_all.values, atol=1e-3)
+
+
+def test_stem_with_stopwords_and_punctuation(model_cache) -> None:
+    with model_cache("Qdrant/bm25") as model:
+        bm25_instance = model.model
+        # Setup
+        original_stopwords = bm25_instance.stopwords.copy()
+        original_punctuation = bm25_instance.punctuation.copy()
+
+        bm25_instance.stopwords = {"the", "is", "a"}
+        bm25_instance.punctuation = {".", ",", "!"}
+
+        # Test data
+        tokens = ["The", "quick", "brown", "fox", "is", "a", "test", "sentence", ".", "!"]
+
+        # Execute
+        result = bm25_instance._stem(tokens)
+
+        # Assert
+        expected = ["quick", "brown", "fox", "test", "sentenc"]
+        assert result == expected, f"Expected {expected}, but got {result}"
+
+        bm25_instance.stopwords = original_stopwords
+        bm25_instance.punctuation = original_punctuation
+
+
+def test_stem_case_insensitive_stopwords(model_cache) -> None:
+    with model_cache("Qdrant/bm25") as model:
+        bm25_instance = model.model
+        original_stopwords = bm25_instance.stopwords.copy()
+        original_punctuation = bm25_instance.punctuation.copy()
+
+        # Setup
+        bm25_instance.stopwords = {"the", "is", "a"}
+        bm25_instance.punctuation = {".", ",", "!"}
+
+        # Test data
+        tokens = ["THE", "Quick", "Brown", "Fox", "IS", "A", "Test", "Sentence", ".", "!"]
+
+        # Execute
+        result = bm25_instance._stem(tokens)
+
+        # Assert
+        expected = ["quick", "brown", "fox", "test", "sentenc"]
+        assert result == expected, f"Expected {expected}, but got {result}"
+        bm25_instance.stopwords = original_stopwords
+        bm25_instance.punctuation = original_punctuation
+
+
+@pytest.mark.parametrize("disable_stemmer", [True, False])
+def test_disable_stemmer_behavior(disable_stemmer: bool) -> None:
+    # Setup
+    model = Bm25("Qdrant/bm25", language="english", disable_stemmer=disable_stemmer)
+    model.stopwords = {"the", "is", "a"}
+    model.punctuation = {".", ",", "!"}
+
+    # Test data
+    tokens = ["The", "quick", "brown", "fox", "is", "a", "test", "sentence", ".", "!"]
+
+    # Execute
+    result = model._stem(tokens)
+
+    # Assert
+    if disable_stemmer:
+        expected = ["quick", "brown", "fox", "test", "sentence"]  # no stemming, lower case only
+    else:
+        expected = ["quick", "brown", "fox", "test", "sentenc"]
+    assert result == expected, f"Expected {expected}, but got {result}"
+
+
+class _PolishStemmer:
+    def stem_word(self, word: str) -> str:
+        for suffix in ("ami", "ach"):
+            if word.endswith(suffix):
+                return word[: -len(suffix)]
+        return word
+
+
+def test_custom_stemmer_applies_to_documents_and_queries() -> None:
+    model = SparseTextEmbedding(
+        "Qdrant/bm25",
+        language="polish",
+        stemmer=_PolishStemmer(),
+        stopwords={"W"},
+        k=1.0,
+        b=0.0,
+    )
+    text = "Kotami kotach w domach!"
+    document = next(iter(model.embed(text)))
+    query = next(iter(model.query_embed(text)))
+
+    assert dict(zip(document.indices, document.values)) == pytest.approx(
+        {Bm25.compute_token_id("kot"): 4 / 3, Bm25.compute_token_id("dom"): 1.0}
+    )
+    assert dict(zip(query.indices, query.values)) == {
+        Bm25.compute_token_id("kot"): 1.0,
+        Bm25.compute_token_id("dom"): 1.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "disable_stemmer,stopwords,expected",
+    [
+        (False, None, ["fox"]),
+        (True, None, ["the", "and", "fox"]),
+        (False, set(), ["the", "and", "fox"]),
+        (True, set(), ["the", "and", "fox"]),
+        (False, {"The", "FOX"}, ["and"]),
+        (True, {"The", "FOX"}, ["and"]),
+    ],
+)
+def test_stopword_precedence(
+    stopwords: set[str] | None, disable_stemmer: bool, expected: list[str]
+) -> None:
+    model = Bm25(
+        "Qdrant/bm25",
+        stopwords=stopwords,
+        disable_stemmer=disable_stemmer,
+    )
+
+    assert model._stem(["THE", "and", "FOX"]) == expected
+
+
+def test_unsupported_language_requires_custom_or_disabled_stemmer() -> None:
+    with pytest.raises(ValueError, match="polish language is not supported"):
+        Bm25("Qdrant/bm25", language="polish", stopwords=set())
+
+
+def test_custom_and_disabled_stemmer_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="stemmer cannot be supplied with disable_stemmer=True"):
+        Bm25("Qdrant/bm25", stemmer=_PolishStemmer(), disable_stemmer=True)
+
+
+def test_parallel_matches_serial() -> None:
+    model = SparseTextEmbedding(
+        "Qdrant/bm25",
+        language="polish",
+        stemmer=_PolishStemmer(),
+        stopwords={"w", "kotami"},
+    )
+    documents = ["Kotami kotach w domach", "W domach", "", "kotami"]
+    serial = list(model.embed(documents))
+    # More documents than batch_size ensures this actually starts worker processes.
+    parallel = list(model.embed(documents, batch_size=2, parallel=2))
+
+    assert len(serial) == len(parallel) == len(documents)
+    for expected, actual in zip(serial, parallel):
+        assert actual.indices.tolist() == expected.indices.tolist()
+        assert actual.values.tolist() == pytest.approx(expected.values.tolist())
+
+
+def test_if_splade_query_embed_is_inference_free() -> None:
+    is_ci = os.getenv("CI")
+    model = SparseTextEmbedding(
+        model_name="opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte",
+        lazy_load=True,
+    )
+    embeddings = list(model.query_embed(["hello world", "flag embedding"]))
+    assert model.token_count(["hello world", "flag embedding"]) > 0
+    # queries are embedded with a tokenizer and an idf lookup table only, and token counting
+    # needs the tokenizer alone, so the onnx model must stay unloaded
+    assert not hasattr(model.model, "model")
+    assert all(len(embedding.indices) > 0 for embedding in embeddings)
+
+    if is_ci:
+        delete_model_cache(model.model._model_dir)
+
+
+@pytest.mark.parametrize("model_name", ["prithivida/Splade_PP_en_v1"])
+def test_lazy_load(model_name: str) -> None:
+    is_ci = os.getenv("CI")
+    model = SparseTextEmbedding(model_name=model_name, lazy_load=True)
+    assert not hasattr(model.model, "model")
+
+    docs = ["hello world", "flag embedding"]
+    assert model.token_count(docs) > 0
+    assert not hasattr(model.model, "model")
+    list(model.embed(docs))
+    assert hasattr(model.model, "model")
+
+    model = SparseTextEmbedding(model_name=model_name, lazy_load=True)
+    list(model.query_embed(docs))
+
+    model = SparseTextEmbedding(model_name=model_name, lazy_load=True)
+    list(model.passage_embed(docs))
+
+    if is_ci:
+        delete_model_cache(model.model._model_dir)
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "prithivida/Splade_PP_en_v1",
+        "Qdrant/minicoil-v1",
+        "Qdrant/bm42-all-minilm-l6-v2-attentions",
+    ],
+)
+def test_session_options(model_cache, model_name) -> None:
+    with model_cache(model_name) as default_model:
+        default_session_options = default_model.model.model.get_session_options()
+        assert default_session_options.enable_cpu_mem_arena is True
+        model = SparseTextEmbedding(model_name=model_name, enable_cpu_mem_arena=False)
+        session_options = model.model.model.get_session_options()
+        assert session_options.enable_cpu_mem_arena is False
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "prithivida/Splade_PP_en_v1",
+        "Qdrant/minicoil-v1",
+        "Qdrant/bm42-all-minilm-l6-v2-attentions",
+        "Qdrant/bm25",
+    ],
+)
+def test_token_count(model_cache, model_name) -> None:
+    with model_cache(model_name) as model:
+        documents = [
+            "Name me a couple of cities were the capitals of Germany?",
+            "Berlin is the current capital of Germany, Bonn is a former capital of Germany.",
+        ]
+        first_doc_token_count = model.token_count(documents[0])
+        second_doc_token_count = model.token_count(documents[1])
+        doc_token_count = model.token_count(documents)
+        assert first_doc_token_count + second_doc_token_count == doc_token_count
+        assert doc_token_count == model.token_count(documents, batch_size=1)
